@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Ring Live</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: transparent; width: 380px; height: 260px; overflow: hidden; font-family: 'IBM Plex Mono', monospace; -webkit-app-region: drag; }
+
+  #wrapper {
+    width: 380px; height: 260px; border-radius: 12px; overflow: hidden;
+    position: relative; background: #0a0a0f;
+    border: 1px solid rgba(59,130,246,0.5);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(59,130,246,0.15);
+    animation: popIn 0.3s cubic-bezier(0.175,0.885,0.32,1.275) both;
+  }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  #overlay {
+    position: absolute; inset: 0;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, transparent 35%, transparent 60%, rgba(0,0,0,0.7) 100%);
+    display: flex; flex-direction: column; justify-content: space-between;
+    padding: 10px 12px; -webkit-app-region: no-drag;
+  }
+  #top-bar { display: flex; align-items: center; justify-content: space-between; }
+  .live-badge { display: flex; align-items: center; gap: 5px; background: rgba(239,68,68,0.85); border-radius: 4px; padding: 3px 8px; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; color: #fff; }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #fff; animation: pulse 1s ease-in-out infinite; }
+  #close-btn { width: 26px; height: 26px; border-radius: 50%; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.2); color: rgba(255,255,255,0.8); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.2s; -webkit-app-region: no-drag; }
+  #close-btn:hover { background: rgba(239,68,68,0.8); border-color: transparent; }
+  #bottom-bar { display: flex; align-items: flex-end; justify-content: space-between; }
+  #camera-name { font-size: 13px; font-weight: 600; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,0.8); margin-bottom: 2px; }
+  #event-label { font-size: 10px; color: rgba(255,255,255,0.6); letter-spacing: 0.08em; }
+  #timestamp   { font-size: 10px; color: rgba(255,255,255,0.5); letter-spacing: 0.06em; }
+
+  #loading-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #0a0a0f; z-index: 10; }
+  #loading-state.hidden { display: none; }
+  .stream-spinner { width: 32px; height: 32px; border: 2px solid rgba(59,130,246,0.2); border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.9s linear infinite; }
+  #loading-state p { font-size: 10px; color: rgba(255,255,255,0.4); letter-spacing: 0.1em; }
+  #loading-cam { font-size: 12px; color: rgba(255,255,255,0.7); font-weight: 600; }
+
+  #error-state { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: #0a0a0f; z-index: 10; padding: 20px; text-align: center; }
+  #error-state.visible { display: flex; }
+  #error-state .err-icon { font-size: 28px; opacity: 0.5; }
+  #error-state p { font-size: 11px; color: rgba(255,255,255,0.4); letter-spacing: 0.06em; line-height: 1.5; }
+
+  #wrapper::after  { content:''; position:absolute; inset:0; background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px); pointer-events:none; border-radius:12px; }
+  #wrapper::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; background:linear-gradient(90deg,transparent,#3b82f6,#22d3ee,transparent); z-index:20; }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  @keyframes spin  { to{transform:rotate(360deg)} }
+  @keyframes popIn { from{opacity:0;transform:scale(0.85) translateY(-10px)} to{opacity:1;transform:scale(1) translateY(0)} }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"></script>
+</head>
+<body>
+<div id="wrapper">
+  <video id="live-video" autoplay muted playsinline></video>
+
+  <div id="loading-state">
+    <div class="stream-spinner"></div>
+    <div id="loading-cam">Camera</div>
+    <p>CONNECTING LIVE STREAM...</p>
+  </div>
+
+  <div id="error-state">
+    <div class="err-icon">📡</div>
+    <p id="error-msg">STREAM UNAVAILABLE</p>
+  </div>
+
+  <div id="overlay">
+    <div id="top-bar">
+      <div class="live-badge"><div class="live-dot"></div>LIVE</div>
+      <button id="close-btn">✕</button>
+    </div>
+    <div id="bottom-bar">
+      <div>
+        <div id="camera-name">Camera</div>
+        <div id="event-label">🏃 MOTION DETECTED</div>
+      </div>
+      <div id="timestamp">--:--</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const { ipcRenderer } = require('electron')
+const video        = document.getElementById('live-video')
+const loadingState = document.getElementById('loading-state')
+const errorState   = document.getElementById('error-state')
+const camNameEl    = document.getElementById('camera-name')
+const loadingCamEl = document.getElementById('loading-cam')
+const eventLabelEl = document.getElementById('event-label')
+const tsEl         = document.getElementById('timestamp')
+const errorMsg     = document.getElementById('error-msg')
+let hls = null
+
+setInterval(() => {
+  tsEl.textContent = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+}, 1000)
+
+document.getElementById('close-btn').addEventListener('click', () => ipcRenderer.send('close-popup'))
+
+ipcRenderer.on('camera-update', (_, { cameraName, eventType }) => {
+  camNameEl.textContent    = cameraName
+  loadingCamEl.textContent = cameraName
+  eventLabelEl.textContent = eventType === 'ding' ? '🔔 DOORBELL PRESSED' : '🏃 MOTION DETECTED'
+})
+
+ipcRenderer.on('stream-ready', async (_, hlsPath) => {
+  const port = await ipcRenderer.invoke('get-hls-port')
+  setTimeout(() => loadStream(`http://127.0.0.1:${port}${hlsPath}`), 2000)
+})
+
+ipcRenderer.on('stream-error', (_, msg) => {
+  loadingState.classList.add('hidden')
+  errorState.classList.add('visible')
+  errorMsg.textContent = 'STREAM ERROR\n' + (msg || '')
+})
+
+function loadStream(url) {
+  if (!Hls.isSupported()) {
+    loadingState.classList.add('hidden')
+    errorState.classList.add('visible')
+    errorMsg.textContent = 'HLS NOT SUPPORTED'
+    return
+  }
+  if (hls) hls.destroy()
+  hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 4, maxBufferLength: 8 })
+  hls.loadSource(url)
+  hls.attachMedia(video)
+  hls.on(Hls.Events.MANIFEST_PARSED, () => { loadingState.classList.add('hidden'); video.play().catch(()=>{}) })
+  hls.on(Hls.Events.ERROR, (_, d) => {
+    if (d.fatal) {
+      errorState.classList.add('visible')
+      loadingState.classList.add('hidden')
+      errorMsg.textContent = 'STREAM LOST — Retrying...'
+      setTimeout(() => { errorState.classList.remove('visible'); loadingState.classList.remove('hidden'); loadStream(url) }, 3000)
+    }
+  })
+}
+</script>
+</body>
+</html>

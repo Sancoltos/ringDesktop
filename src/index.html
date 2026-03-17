@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Ring Desktop</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+  :root {
+    --bg:      #0a0a0f;
+    --surface: #111118;
+    --border:  #1e1e2e;
+    --accent:  #3b82f6;
+    --accent2: #22d3ee;
+    --danger:  #ef4444;
+    --motion:  #f59e0b;
+    --text:    #e2e8f0;
+    --muted:   #64748b;
+    --green:   #22c55e;
+    --card:    #13131c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif; font-size: 14px;
+    height: 100vh; overflow: hidden; display: flex; flex-direction: column;
+  }
+
+  /* ── TITLEBAR ── */
+  #titlebar {
+    height: 48px; background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 20px; gap: 12px;
+    -webkit-app-region: drag; flex-shrink: 0;
+  }
+  .logo { font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; display: flex; align-items: center; gap: 8px; }
+  .logo .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 2s ease-in-out infinite; }
+  #status-badge { margin-left: auto; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--muted); -webkit-app-region: no-drag; display: flex; align-items: center; gap: 6px; }
+  #status-badge .indicator { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+  #status-badge.connected { color: var(--green); }
+  #status-badge.connected .indicator { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #status-badge.error { color: var(--danger); }
+  #status-badge.error .indicator { background: var(--danger); }
+
+  /* ── TOAST ── */
+  #toast-area { position: fixed; top: 56px; right: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 9999; pointer-events: none; }
+  .toast { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 10px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; animation: slideIn 0.3s ease, fadeOut 0.4s ease 3.5s forwards; pointer-events: all; max-width: 300px; }
+  .toast.motion { border-color: rgba(245,158,11,0.4); }
+  .toast.ding   { border-color: rgba(59,130,246,0.4); }
+  .toast.saved  { border-color: rgba(34,197,94,0.4); }
+  .toast-icon { font-size: 16px; }
+  .toast-body { color: var(--text); line-height: 1.4; }
+  .toast-sub  { color: var(--muted); font-size: 10px; margin-top: 2px; }
+
+  /* ── AUTH SCREEN ── */
+  #auth-screen { flex: 1; display: flex; align-items: center; justify-content: center; padding: 40px; }
+  #auth-screen.hidden { display: none; }
+  .auth-box { width: 440px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 36px; }
+  .auth-box h2 { font-family: 'IBM Plex Mono', monospace; font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+  .auth-subtitle { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 28px; }
+  .form-row { margin-bottom: 16px; }
+  .form-label { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; margin-bottom: 7px; }
+  .form-input { width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: var(--text); font-family: 'IBM Plex Mono', monospace; font-size: 13px; outline: none; transition: border-color 0.2s; }
+  .form-input:focus { border-color: var(--accent); }
+  .form-input::placeholder { color: var(--muted); opacity: 0.5; }
+
+  #twofa-row { display: none; }
+  #twofa-row.visible { display: block; }
+  .twofa-hint { font-size: 12px; color: var(--motion); margin-bottom: 10px; padding: 8px 12px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2); border-radius: 6px; font-family: 'IBM Plex Mono', monospace; }
+
+  .btn-primary { width: 100%; padding: 11px; background: var(--accent); color: #fff; border: none; border-radius: 6px; font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 600; cursor: pointer; letter-spacing: 0.06em; transition: opacity 0.2s, transform 0.1s; }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-primary:active { transform: scale(0.98); }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+  #auth-error { margin-top: 12px; padding: 10px 14px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: 6px; color: var(--danger); font-size: 12px; display: none; font-family: 'IBM Plex Mono', monospace; }
+
+  /* ── LOADER ── */
+  #loader { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+  #loader.visible { display: flex; }
+  .ring-spinner { width: 40px; height: 40px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
+  #loader p { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--muted); letter-spacing: 0.08em; }
+
+  /* ── MAIN APP ── */
+  #app { flex: 1; display: none; flex-direction: column; overflow: hidden; }
+  #app.visible { display: flex; }
+
+  /* ── TOOLBAR ── */
+  #toolbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .tab-btn { padding: 6px 14px; background: transparent; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-family: 'IBM Plex Mono', monospace; font-size: 11px; cursor: pointer; letter-spacing: 0.06em; transition: all 0.2s; }
+  .tab-btn.active, .tab-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(59,130,246,0.08); }
+  .toolbar-right { margin-left: auto; display: flex; gap: 8px; }
+  .icon-btn { padding: 6px 12px; background: transparent; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-family: 'IBM Plex Mono', monospace; font-size: 11px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 5px; }
+  .icon-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+  .icon-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
+  .icon-btn.warn:hover { border-color: var(--motion); color: var(--motion); }
+  .spinning svg { animation: spin 0.8s linear infinite; }
+
+  /* ── CONTENT ── */
+  #content { flex: 1; overflow-y: auto; padding: 24px; }
+  #content::-webkit-scrollbar { width: 6px; }
+  #content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* ── CAMERAS ── */
+  .cameras-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+  .camera-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; transition: border-color 0.2s, transform 0.2s; animation: fadein 0.3s ease both; }
+  .camera-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .snapshot-wrap { position: relative; width: 100%; aspect-ratio: 16/9; background: var(--surface); overflow: hidden; }
+  .snapshot-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .snap-loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--muted); letter-spacing: 0.08em; }
+  .camera-info { padding: 14px 16px; }
+  .camera-name { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+  .camera-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tag { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: 0.06em; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); color: var(--muted); text-transform: uppercase; }
+  .tag.online { border-color: var(--green); color: var(--green); }
+  .tag.battery { border-color: var(--motion); color: var(--motion); }
+  .camera-actions { display: flex; gap: 8px; }
+  .action-btn { flex: 1; padding: 7px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-family: 'IBM Plex Mono', monospace; font-size: 10px; cursor: pointer; letter-spacing: 0.06em; transition: all 0.2s; text-align: center; }
+  .action-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ── EVENTS ── */
+  .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .section-header h3 { font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 600; letter-spacing: 0.06em; }
+  .section-count { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--muted); }
+  .list { display: flex; flex-direction: column; gap: 10px; }
+  .event-row { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; display: grid; grid-template-columns: 32px 1fr auto auto; gap: 14px; align-items: center; transition: border-color 0.2s; animation: fadein 0.3s ease both; }
+  .event-row:hover { border-color: #2a2a3e; }
+  .event-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+  .event-icon.motion { background: rgba(245,158,11,0.1); }
+  .event-icon.ding   { background: rgba(59,130,246,0.1); }
+  .event-title { font-weight: 500; font-size: 13px; margin-bottom: 2px; }
+  .event-sub   { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--muted); }
+  .event-time  { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--muted); text-align: right; white-space: nowrap; }
+  .link-btn { padding: 5px 12px; background: transparent; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); font-family: 'IBM Plex Mono', monospace; font-size: 10px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+  .link-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+  .link-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* ── RECORDINGS ── */
+  .recordings-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .recordings-toolbar h3 { font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 600; letter-spacing: 0.06em; }
+  .clip-row { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; display: grid; grid-template-columns: auto 1fr auto auto; gap: 14px; align-items: center; transition: border-color 0.2s; animation: fadein 0.3s ease both; margin-bottom: 10px; }
+  .clip-row:hover { border-color: var(--accent); }
+  .clip-icon { font-size: 22px; }
+  .clip-name { font-weight: 500; font-size: 13px; margin-bottom: 2px; word-break: break-all; }
+  .clip-meta { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--muted); }
+  .clip-size { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--muted); text-align: right; }
+
+  /* ── EMPTY STATE ── */
+  .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 20px; color: var(--muted); text-align: center; gap: 10px; }
+  .empty-state .icon { font-size: 36px; opacity: 0.4; }
+  .empty-state p { font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.06em; }
+
+  /* ── ANIMS ── */
+  @keyframes pulse   { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  @keyframes spin    { to{transform:rotate(360deg)} }
+  @keyframes fadein  { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes slideIn { from{opacity:0;transform:translateX(20px)} to{opacity:1;transform:translateX(0)} }
+  @keyframes fadeOut { from{opacity:1} to{opacity:0;transform:translateX(20px)} }
+</style>
+</head>
+<body>
+
+<div id="titlebar">
+  <div class="logo"><div class="dot"></div>RING DESKTOP</div>
+  <div id="status-badge">
+    <div class="indicator"></div>
+    <span id="status-text">NOT CONNECTED</span>
+  </div>
+</div>
+
+<div id="toast-area"></div>
+
+<!-- ── AUTH ── -->
+<div id="auth-screen">
+  <div class="auth-box">
+    <h2>Sign in to Ring</h2>
+    <p class="auth-subtitle">Enter your Ring account credentials to connect your cameras.</p>
+
+    <div class="form-row">
+      <label class="form-label">Email</label>
+      <input class="form-input" type="email" id="email-input" placeholder="you@example.com" />
+    </div>
+    <div class="form-row">
+      <label class="form-label">Password</label>
+      <input class="form-input" type="password" id="password-input" placeholder="••••••••" />
+    </div>
+
+    <div class="form-row" id="twofa-row">
+      <div class="twofa-hint">📱 Ring sent a 2FA code to your phone or email. Enter it below.</div>
+      <label class="form-label">2FA Code</label>
+      <input class="form-input" type="text" id="twofa-input" placeholder="123456" maxlength="8" />
+    </div>
+
+    <button class="btn-primary" id="login-btn">Sign In</button>
+    <div id="auth-error"></div>
+  </div>
+</div>
+
+<!-- ── LOADER ── -->
+<div id="loader">
+  <div class="ring-spinner"></div>
+  <p id="loader-text">CONNECTING...</p>
+</div>
+
+<!-- ── APP ── -->
+<div id="app">
+  <div id="toolbar">
+    <button class="tab-btn active" data-tab="cameras">📷 Cameras</button>
+    <button class="tab-btn" data-tab="events">⚡ Events</button>
+    <button class="tab-btn" data-tab="recordings">🎬 Recordings</button>
+    <div class="toolbar-right">
+      <button class="icon-btn warn" id="test-btn">🧪 TEST</button>
+      <button class="icon-btn" id="refresh-btn">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M23 4v6h-6M1 20v-6h6"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+        REFRESH
+      </button>
+      <button class="icon-btn danger" id="disconnect-btn">SIGN OUT</button>
+    </div>
+  </div>
+
+  <div id="content">
+    <!-- CAMERAS -->
+    <div id="cameras-view" class="view active">
+      <div class="cameras-grid" id="cameras-grid"></div>
+    </div>
+
+    <!-- EVENTS -->
+    <div id="events-view" class="view">
+      <div class="section-header">
+        <h3>RECENT EVENTS</h3>
+        <span class="section-count" id="events-count"></span>
+      </div>
+      <div class="list" id="events-list"></div>
+    </div>
+
+    <!-- RECORDINGS -->
+    <div id="recordings-view" class="view">
+      <div class="recordings-toolbar">
+        <h3>SAVED CLIPS</h3>
+        <button class="icon-btn" id="open-folder-btn">📁 OPEN FOLDER</button>
+      </div>
+      <div id="clips-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const { ipcRenderer } = require('electron')
+
+// ── REFS ──
+const authScreen   = document.getElementById('auth-screen')
+const loaderEl     = document.getElementById('loader')
+const loaderText   = document.getElementById('loader-text')
+const appEl        = document.getElementById('app')
+const emailInput   = document.getElementById('email-input')
+const passwordInput= document.getElementById('password-input')
+const twofaRow     = document.getElementById('twofa-row')
+const twofaInput   = document.getElementById('twofa-input')
+const loginBtn     = document.getElementById('login-btn')
+const authError    = document.getElementById('auth-error')
+const statusBadge  = document.getElementById('status-badge')
+const statusText   = document.getElementById('status-text')
+const camerasGrid  = document.getElementById('cameras-grid')
+const eventsList   = document.getElementById('events-list')
+const eventsCount  = document.getElementById('events-count')
+const clipsList    = document.getElementById('clips-list')
+const toastArea    = document.getElementById('toast-area')
+
+let currentTab    = 'cameras'
+let cameraData    = []
+let pendingEmail    = null   // cached after first login attempt for 2FA reuse
+let pendingPassword = null
+
+// ── VIEWS ──
+function showAuth()    { loaderEl.classList.remove('visible'); appEl.classList.remove('visible'); authScreen.classList.remove('hidden'); }
+function showLoader(t) { authScreen.classList.add('hidden');   appEl.classList.remove('visible'); loaderEl.classList.add('visible'); loaderText.textContent = t }
+function showApp()     { loaderEl.classList.remove('visible'); authScreen.classList.add('hidden'); appEl.classList.add('visible'); }
+function setStatus(cls, t) { statusBadge.className = cls; statusText.textContent = t; }
+
+// ── TOAST ──
+function toast(type, icon, title, sub) {
+  const t = document.createElement('div')
+  t.className = `toast ${type}`
+  t.innerHTML = `<div class="toast-icon">${icon}</div><div><div class="toast-body">${title}</div>${sub ? `<div class="toast-sub">${sub}</div>` : ''}</div>`
+  toastArea.appendChild(t)
+  setTimeout(() => t.remove(), 4200)
+}
+
+ipcRenderer.on('motion-event', (_, { name }) => toast('motion', '🏃', 'Motion Detected', name))
+ipcRenderer.on('ding-event',   (_, { name }) => toast('ding',   '🔔', 'Doorbell Pressed', name))
+ipcRenderer.on('clip-saved',   (_, { file, camera }) => {
+  const fname = file.split(/[\\/]/).pop()
+  toast('saved', '💾', 'Clip Saved', fname)
+  if (currentTab === 'recordings') loadClips()
+})
+
+// ── LOGIN ──
+loginBtn.addEventListener('click', doLogin)
+;[emailInput, passwordInput, twofaInput].forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() }))
+
+async function doLogin() {
+  const twoFa = twofaInput.value.trim()
+
+  // If 2FA row is visible, reuse the cached credentials — don't re-read email/password
+  // This prevents Ring from treating it as a new login and sending another code
+  const email    = pendingEmail    || emailInput.value.trim()
+  const password = pendingPassword || passwordInput.value
+
+  if (!email || !password) {
+    authError.style.display = 'block'
+    authError.textContent   = 'Please enter your email and password.'
+    return
+  }
+
+  authError.style.display = 'none'
+  loginBtn.disabled    = true
+  loginBtn.textContent = 'Signing in...'
+  showLoader('SIGNING IN TO RING...')
+
+  const res = await ipcRenderer.invoke('login', { email, password, twoFactorCode: twoFa || undefined })
+
+  if (res.ok) {
+    // Clear cached credentials on success
+    pendingEmail    = null
+    pendingPassword = null
+    await onConnected(res.count)
+  } else if (res.needs2fa) {
+    // Cache credentials so the next submission reuses them (no new login = no new SMS)
+    pendingEmail    = email
+    pendingPassword = password
+    showAuth()
+    twofaRow.classList.add('visible')
+    twofaInput.focus()
+    authError.style.display = 'block'
+    authError.textContent   = '📱 Ring sent a code to your phone or email. Enter it above and click Sign In.'
+  } else {
+    showAuth()
+    authError.style.display = 'block'
+    authError.textContent   = 'Sign in failed: ' + (res.error || 'Unknown error')
+  }
+
+  loginBtn.disabled    = false
+  loginBtn.textContent = 'Sign In'
+}
+
+async function onConnected(count) {
+  setStatus('connected', `CONNECTED · ${count} CAMERA${count !== 1 ? 'S' : ''}`)
+  showApp()
+  await loadCameras()
+}
+
+// ── DISCONNECT ──
+document.getElementById('disconnect-btn').addEventListener('click', async () => {
+  await ipcRenderer.invoke('disconnect')
+  cameraData      = []
+  pendingEmail    = null
+  pendingPassword = null
+  camerasGrid.innerHTML = ''
+  eventsList.innerHTML  = ''
+  clipsList.innerHTML   = ''
+  twofaRow.classList.remove('visible')
+  twofaInput.value = ''
+  setStatus('', 'NOT CONNECTED')
+  showAuth()
+})
+
+// ── TABS ──
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+    btn.classList.add('active')
+    currentTab = btn.dataset.tab
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'))
+    document.getElementById(`${currentTab}-view`).classList.add('active')
+    if (currentTab === 'events')     loadEvents()
+    if (currentTab === 'recordings') loadClips()
+  })
+})
+
+// ── REFRESH ──
+const refreshBtn = document.getElementById('refresh-btn')
+refreshBtn.addEventListener('click', async () => {
+  refreshBtn.classList.add('spinning')
+  if (currentTab === 'cameras')    await loadCameras()
+  if (currentTab === 'events')     await loadEvents()
+  if (currentTab === 'recordings') await loadClips()
+  refreshBtn.classList.remove('spinning')
+})
+
+// ── TEST POPUP ──
+document.getElementById('test-btn').addEventListener('click', () => ipcRenderer.send('test-popup'))
+
+// ── OPEN RECORDINGS FOLDER ──
+document.getElementById('open-folder-btn').addEventListener('click', () => ipcRenderer.send('open-recordings'))
+
+// ── CAMERAS ──
+async function loadCameras() {
+  cameraData = await ipcRenderer.invoke('get-cameras')
+  if (!cameraData.length) {
+    camerasGrid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="icon">📷</div><p>NO CAMERAS FOUND</p></div>`
+    return
+  }
+  camerasGrid.innerHTML = cameraData.map((cam, i) => `
+    <div class="camera-card" style="animation-delay:${i*60}ms">
+      <div class="snapshot-wrap">
+        <div class="snap-loading" id="sl-${i}">
+          <div class="ring-spinner" style="width:22px;height:22px;border-width:2px"></div>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:0.08em">LOADING</span>
+        </div>
+        <img id="si-${i}" src="" style="display:none" />
+      </div>
+      <div class="camera-info">
+        <div class="camera-name">${cam.name}</div>
+        <div class="camera-meta">
+          <span class="tag online">● ONLINE</span>
+          <span class="tag">${cam.kind || 'RING'}</span>
+          ${cam.battery != null ? `<span class="tag battery">🔋 ${cam.battery}%</span>` : ''}
+        </div>
+        <div class="camera-actions">
+          <button class="action-btn" onclick="refreshSnap(${i},'${cam.id}')">↺ Snapshot</button>
+          <button class="action-btn" onclick="showCamEvents('${cam.id}')">⚡ Events</button>
+        </div>
+      </div>
+    </div>`).join('')
+  cameraData.forEach((cam, i) => loadSnap(i, cam.id))
+}
+
+async function loadSnap(index, id) {
+  const loading = document.getElementById(`sl-${index}`)
+  const img     = document.getElementById(`si-${index}`)
+  if (!img) return
+  const b64 = await ipcRenderer.invoke('get-snapshot', id)
+  if (b64) {
+    img.src = `data:image/jpeg;base64,${b64}`
+    img.style.display = 'block'
+    if (loading) loading.style.display = 'none'
+  } else {
+    if (loading) loading.innerHTML = `<span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">UNAVAILABLE</span>`
+  }
+}
+
+function refreshSnap(i, id) {
+  const loading = document.getElementById(`sl-${i}`)
+  const img     = document.getElementById(`si-${i}`)
+  if (img) { img.style.display='none'; img.src='' }
+  if (loading) { loading.style.display='flex'; loading.innerHTML=`<div class="ring-spinner" style="width:22px;height:22px;border-width:2px"></div>` }
+  loadSnap(i, id)
+}
+
+async function showCamEvents(id) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+  document.querySelector('[data-tab="events"]').classList.add('active')
+  currentTab = 'events'
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'))
+  document.getElementById('events-view').classList.add('active')
+  await loadEvents(id)
+}
+
+// ── EVENTS ──
+async function loadEvents(cameraId = null) {
+  eventsList.innerHTML = `<div class="empty-state"><div class="icon">⚡</div><p>LOADING...</p></div>`
+  eventsCount.textContent = ''
+  const events = await ipcRenderer.invoke('get-events', cameraId || null)
+  eventsCount.textContent = `${events.length} EVENTS`
+  if (!events.length) {
+    eventsList.innerHTML = `<div class="empty-state"><div class="icon">📭</div><p>NO RECENT EVENTS</p></div>`
+    return
+  }
+  eventsList.innerHTML = events.map((ev, i) => {
+    const isMotion = ev.kind === 'motion', isDing = ev.kind === 'ding'
+    const icon     = isMotion ? '🏃' : isDing ? '🔔' : '●'
+    const label    = isMotion ? 'Motion Detected' : isDing ? 'Doorbell Pressed' : (ev.kind || 'Event')
+    const ts       = ev.created_at ? new Date(ev.created_at) : null
+    return `<div class="event-row" style="animation-delay:${i*30}ms">
+      <div class="event-icon ${isMotion?'motion':isDing?'ding':''}">${icon}</div>
+      <div><div class="event-title">${label}</div><div class="event-sub">${ev.cameraName}</div></div>
+      <div class="event-time">${ts ? fmtTime(ts) : '—'}</div>
+    </div>`
+  }).join('')
+}
+
+async function openRec(dingId, btn) {
+  if (!dingId) return
+  btn.textContent = '...'; btn.disabled = true
+  const url = await ipcRenderer.invoke('get-recording-url', dingId)
+  if (url) { ipcRenderer.send('open-url', url); btn.textContent = '✓' }
+  else { btn.textContent = '✗ N/A' }
+  setTimeout(() => { btn.textContent = '▶ Play'; btn.disabled = false }, 2500)
+}
+
+// ── RECORDINGS ──
+async function loadClips() {
+  const clips = await ipcRenderer.invoke('get-saved-clips')
+  if (!clips.length) {
+    clipsList.innerHTML = `<div class="empty-state"><div class="icon">🎬</div><p>NO CLIPS YET<br>Clips save automatically when motion is detected</p></div>`
+    return
+  }
+  clipsList.innerHTML = clips.map((c, i) => {
+    const sizeMB = (c.size / 1024 / 1024).toFixed(1)
+    const date   = new Date(c.mtime)
+    return `<div class="clip-row" style="animation-delay:${i*30}ms">
+      <div class="clip-icon">🎬</div>
+      <div><div class="clip-name">${c.file}</div><div class="clip-meta">${fmtTime(date)}</div></div>
+      <div class="clip-size">${sizeMB} MB</div>
+      <button class="link-btn" onclick="ipcRenderer.send('open-file','${c.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')">▶ Open</button>
+    </div>`
+  }).join('')
+}
+
+// ── HELPERS ──
+function fmtTime(d) {
+  const diff = (Date.now() - d) / 1000
+  if (diff < 60)    return 'Just now'
+  if (diff < 3600)  return `${Math.floor(diff/60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff/3600)}h ago`
+  return d.toLocaleDateString([],{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+}
+
+// ── AUTO LOGIN ──
+;(async () => {
+  const saved = await ipcRenderer.invoke('get-saved-token')
+  if (saved) {
+    showLoader('RECONNECTING...')
+    const res = await ipcRenderer.invoke('connect-token', saved)
+    if (res.ok) { await onConnected(res.count) }
+    else        { showAuth() }
+  }
+})()
+</script>
+</body>
+</html>
