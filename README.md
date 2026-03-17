@@ -31,7 +31,7 @@ Your credentials are **never stored** — only the refresh token (a session key)
 ### Built-in Login
 - Email, password, and 2FA handled inside the app
 - No terminal commands needed
-- Works for any Ring account — just give it to your dad and he enters his own credentials
+- Works for any Ring account
 
 ### Cameras
 - Live snapshots from all your cameras
