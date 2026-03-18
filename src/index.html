@@ -348,15 +348,23 @@ async function doLogin() {
   loginBtn.textContent = 'Sign In'
 }
 
+let _snapRefreshTimer = null
+
 async function onConnected(count) {
   setStatus('connected', `CONNECTED · ${count} CAMERA${count !== 1 ? 'S' : ''}`)
   showApp()
   await loadCameras()
+  // Auto-refresh snapshots every hour
+  if (_snapRefreshTimer) clearInterval(_snapRefreshTimer)
+  _snapRefreshTimer = setInterval(() => {
+    cameraData.forEach((cam, i) => loadSnap(i, cam.id))
+  }, 3600000)
 }
 
 // ── DISCONNECT ──
 document.getElementById('disconnect-btn').addEventListener('click', async () => {
   await ipcRenderer.invoke('disconnect')
+  if (_snapRefreshTimer) { clearInterval(_snapRefreshTimer); _snapRefreshTimer = null }
   cameraData      = []
   pendingEmail    = null
   pendingPassword = null

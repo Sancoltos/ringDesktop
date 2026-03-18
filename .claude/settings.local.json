@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"try { const p = require\\(''ffmpeg-for-homebridge''\\); console.log\\(''ffmpeg-for-homebridge:'', p\\); } catch\\(e\\) { console.log\\(''not found:'', e.message\\); }\")",
+      "Bash(node -e \"try { const p = require\\(''ffmpeg-for-homebridge''\\); console.log\\(''path:'', p\\); const fs = require\\(''fs''\\); console.log\\(''exists:'', fs.existsSync\\(p\\)\\); } catch\\(e\\) { console.log\\(''error:'', e.message\\); }\")",
+      "Bash(ffmpeg -version)",
+      "Bash(node -e \"const p = require\\(''ffmpeg-static''\\); console.log\\(''ffmpeg-static path:'', p\\);\")",
+      "Bash(node -e \"const p = require\\(''ring-client-api''\\); console.log\\(Object.keys\\(p\\)\\);\")"
+    ]
+  }
+}

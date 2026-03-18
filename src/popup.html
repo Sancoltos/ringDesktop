@@ -51,7 +51,6 @@
   @keyframes spin  { to{transform:rotate(360deg)} }
   @keyframes popIn { from{opacity:0;transform:scale(0.85) translateY(-10px)} to{opacity:1;transform:scale(1) translateY(0)} }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"></script>
 </head>
 <body>
 <div id="wrapper">
@@ -85,6 +84,10 @@
 
 <script>
 const { ipcRenderer } = require('electron')
+const fs   = require('fs')
+const path = require('path')
+const os   = require('os')
+const RECORDINGS_DIR = path.join(os.homedir(), 'Desktop', 'Ring Recordings')
 const video        = document.getElementById('live-video')
 const loadingState = document.getElementById('loading-state')
 const errorState   = document.getElementById('error-state')
@@ -93,51 +96,159 @@ const loadingCamEl = document.getElementById('loading-cam')
 const eventLabelEl = document.getElementById('event-label')
 const tsEl         = document.getElementById('timestamp')
 const errorMsg     = document.getElementById('error-msg')
-let hls = null
+let pc = null
+let activeCameraId = null
+let reconnectTimer = null
+let reconnectCount = 0
+let shouldRecord   = false
+let mediaRecorder  = null
+let recordedChunks = []
+const RECORD_MS    = 20000
 
 setInterval(() => {
   tsEl.textContent = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})
 }, 1000)
 
-document.getElementById('close-btn').addEventListener('click', () => ipcRenderer.send('close-popup'))
+document.getElementById('close-btn').addEventListener('click', () => {
+  stopPc()
+  ipcRenderer.send('close-popup')
+})
 
-ipcRenderer.on('camera-update', (_, { cameraName, eventType }) => {
+window.addEventListener('beforeunload', stopPc)
+
+function stopPc() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  if (mediaRecorder && mediaRecorder.state === 'recording') { try { mediaRecorder.stop() } catch(e){} }
+  if (pc) { try { pc.close() } catch(e){} ; pc = null }
+  // Tell main process to end the Ring session so the cooldown timer starts
+  if (activeCameraId) ipcRenderer.invoke('stop-webrtc-session', activeCameraId)
+}
+
+function startRecording(stream) {
+  if (mediaRecorder) { try { mediaRecorder.stop() } catch(e){} }
+  recordedChunks = []
+  try {
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9'
+      : MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+      ? 'video/webm;codecs=vp8'
+      : 'video/webm'
+    mediaRecorder = new MediaRecorder(stream, { mimeType })
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) recordedChunks.push(e.data) }
+    mediaRecorder.onstop = async () => {
+      if (!recordedChunks.length) { mediaRecorder = null; return }
+      try {
+        const blob        = new Blob(recordedChunks, { type: mimeType })
+        const arrayBuffer = await blob.arrayBuffer()
+        const camName     = camNameEl.textContent.replace(/[^a-z0-9]/gi, '_')
+        const stamp       = new Date().toISOString().replace(/[:.]/g, '-').replace('T','_').slice(0,19)
+        const outFile     = path.join(RECORDINGS_DIR, `${stamp}_${camName}.webm`)
+        fs.writeFileSync(outFile, Buffer.from(arrayBuffer))
+        ipcRenderer.send('clip-saved-notify', { file: outFile, camera: camNameEl.textContent })
+      } catch(e) {
+        console.error('[recorder] save failed:', e.message)
+      }
+      recordedChunks = []
+      mediaRecorder  = null
+    }
+    mediaRecorder.start(1000)
+    setTimeout(() => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop()
+    }, RECORD_MS)
+  } catch(e) {
+    console.error('[recorder]', e.message)
+  }
+}
+
+ipcRenderer.on('camera-update', (_, { cameraName, eventType, cameraId, shouldRecord: record }) => {
   camNameEl.textContent    = cameraName
   loadingCamEl.textContent = cameraName
   eventLabelEl.textContent = eventType === 'ding' ? '🔔 DOORBELL PRESSED' : '🏃 MOTION DETECTED'
+  shouldRecord = record || false
+  if (cameraId) {
+    activeCameraId = cameraId
+    reconnectCount = 0
+    stopPc()                                      // cleanly end old session first
+    setTimeout(() => startWebRTC(cameraId), 500)  // wait before starting new one
+  }
 })
 
-ipcRenderer.on('stream-ready', async (_, hlsPath) => {
-  const port = await ipcRenderer.invoke('get-hls-port')
-  setTimeout(() => loadStream(`http://127.0.0.1:${port}${hlsPath}`), 2000)
-})
+async function startWebRTC(cameraId) {
+  stopPc()
+  loadingState.classList.remove('hidden')
+  errorState.classList.remove('visible')
+  video.srcObject = null
 
-ipcRenderer.on('stream-error', (_, msg) => {
-  loadingState.classList.add('hidden')
-  errorState.classList.add('visible')
-  errorMsg.textContent = 'STREAM ERROR\n' + (msg || '')
-})
+  try {
+    pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun.kinesisvideo.us-east-1.amazonaws.com:443' },
+        { urls: 'stun:stun.kinesisvideo.us-west-2.amazonaws.com:443' },
+      ],
+      iceTransportPolicy: 'all',
+    })
 
-function loadStream(url) {
-  if (!Hls.isSupported()) {
+    pc.ontrack = (event) => {
+      if (event.track.kind === 'video') {
+        video.srcObject = event.streams[0]
+        loadingState.classList.add('hidden')
+        video.play().catch(() => {})
+        if (shouldRecord && event.streams[0]) {
+          try { startRecording(event.streams[0].clone()) } catch(e) { console.error('[recorder]', e) }
+        }
+      }
+    }
+
+    pc.onconnectionstatechange = () => {
+      if (pc && (pc.connectionState === 'failed' || pc.connectionState === 'disconnected')) {
+        stopPc()
+        if (activeCameraId && reconnectCount < 5) {
+          reconnectCount++
+          loadingState.classList.remove('hidden')
+          errorState.classList.remove('visible')
+          loadingCamEl.textContent = `Reconnecting (${reconnectCount}/5)…`
+          reconnectTimer = setTimeout(() => startWebRTC(activeCameraId), 3000)
+        } else {
+          loadingState.classList.add('hidden')
+          errorState.classList.add('visible')
+          errorMsg.textContent = 'STREAM LOST'
+        }
+      }
+    }
+
+    pc.addTransceiver('video', { direction: 'recvonly' })
+    pc.addTransceiver('audio', { direction: 'recvonly' })
+
+    const offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+
+    // Wait for ICE gathering (max 6 seconds)
+    await new Promise(resolve => {
+      if (pc.iceGatheringState === 'complete') { resolve(); return }
+      const t = setTimeout(resolve, 6000)
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve() }
+      }
+    })
+
+    const sdpOffer = pc.localDescription.sdp
+    const result = await ipcRenderer.invoke('start-webrtc-session', { cameraId, sdpOffer })
+
+    if (result.error) throw new Error(result.error)
+
+    // Ring answers with a=sendrecv (bidirectional) but RFC 3264 requires
+    // the answer to a recvonly offer to be sendonly or inactive.
+    // Replace sendrecv→sendonly so Chromium accepts the answer.
+    const fixedSdp = result.sdpAnswer.replace(/a=sendrecv/g, 'a=sendonly')
+    await pc.setRemoteDescription({ type: 'answer', sdp: fixedSdp })
+
+  } catch(e) {
     loadingState.classList.add('hidden')
     errorState.classList.add('visible')
-    errorMsg.textContent = 'HLS NOT SUPPORTED'
-    return
+    errorMsg.textContent = 'STREAM ERROR: ' + (e.message || 'unknown')
   }
-  if (hls) hls.destroy()
-  hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 4, maxBufferLength: 8 })
-  hls.loadSource(url)
-  hls.attachMedia(video)
-  hls.on(Hls.Events.MANIFEST_PARSED, () => { loadingState.classList.add('hidden'); video.play().catch(()=>{}) })
-  hls.on(Hls.Events.ERROR, (_, d) => {
-    if (d.fatal) {
-      errorState.classList.add('visible')
-      loadingState.classList.add('hidden')
-      errorMsg.textContent = 'STREAM LOST — Retrying...'
-      setTimeout(() => { errorState.classList.remove('visible'); loadingState.classList.remove('hidden'); loadStream(url) }, 3000)
-    }
-  })
 }
 </script>
 </body>

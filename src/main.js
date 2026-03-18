@@ -26,9 +26,11 @@ let popupWindow  = null
 let ringApi      = null
 let pendingApi   = null   // held between 1st login and 2FA submission
 let cameras      = []
-let activeFFmpeg = {}
-let motionSubs   = {}
-let hlsPort      = null
+let activeFFmpeg    = {}
+let motionSubs      = {}
+let hlsPort         = null
+let simpleSessions  = {}   // cameraId → SimpleWebRtcSession
+let webrtcLastEnd   = {}   // cameraId → timestamp of last session end
 
 // ════════════════════════════════════════
 //  WINDOWS
@@ -45,9 +47,9 @@ function createMainWindow() {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
-function createPopupWindow(cameraName, eventType) {
+function createPopupWindow(cameraName, eventType, cameraId, shouldRecord = false) {
   if (popupWindow && !popupWindow.isDestroyed()) {
-    popupWindow.webContents.send('camera-update', { cameraName, eventType })
+    popupWindow.webContents.send('camera-update', { cameraName, eventType, cameraId, shouldRecord })
     return
   }
   const { width: sw } = screen.getPrimaryDisplay().workAreaSize
@@ -61,9 +63,14 @@ function createPopupWindow(cameraName, eventType) {
   popupWindow.loadFile(path.join(__dirname, 'popup.html'))
   popupWindow.once('ready-to-show', () => {
     popupWindow.show()
-    popupWindow.webContents.send('camera-update', { cameraName, eventType })
+    popupWindow.webContents.send('camera-update', { cameraName, eventType, cameraId, shouldRecord })
   })
-  popupWindow.on('closed', () => { popupWindow = null; stopAllStreams() })
+  popupWindow.on('closed', () => {
+    popupWindow = null
+    stopAllStreams()
+    Object.values(simpleSessions).forEach(s => { try { s.end() } catch(e){} })
+    simpleSessions = {}
+  })
 }
 
 // ════════════════════════════════════════
@@ -86,6 +93,25 @@ hlsServer.listen(0, '127.0.0.1', () => {
 })
 
 // ════════════════════════════════════════
+//  WAIT FOR PLAYLIST
+// ════════════════════════════════════════
+
+async function waitForPlaylist(playlistPath, maxWaitMs = 15000) {
+  const start = Date.now()
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      try {
+        const stat = fs.statSync(playlistPath)
+        if (stat.size > 50) return resolve()
+      } catch(e) {}
+      if (Date.now() - start > maxWaitMs) return reject(new Error('Playlist never appeared'))
+      setTimeout(check, 300)
+    }
+    check()
+  })
+}
+
+// ════════════════════════════════════════
 //  FFMPEG STREAMING (HLS)
 // ════════════════════════════════════════
 
@@ -96,7 +122,9 @@ async function startStream(camera) {
   stopStream(id)
 
   const outDir = path.join(HLS_DIR, id)
-  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true })
+  // Wipe old segments so HLS.js doesn't play stale footage
+  if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true })
+  fs.mkdirSync(outDir, { recursive: true })
   const playlist = path.join(outDir, 'live.m3u8')
 
   try {
@@ -105,13 +133,27 @@ async function startStream(camera) {
 
     await session.startTranscoding({
       ffmpegPath,
-      video: ['-f', 'hls', '-hls_time', '2', '-hls_list_size', '6', '-hls_flags', 'delete_segments+append_list', '-hls_segment_filename', path.join(outDir, 'seg%03d.ts'), playlist],
+      video: [
+        '-f', 'hls',
+        '-hls_time', '1',
+        '-hls_list_size', '3',
+        '-hls_flags', 'delete_segments+omit_endlist',
+        '-hls_segment_filename', path.join(outDir, 'seg%03d.ts'),
+        playlist,
+      ],
       audio: [],
     })
 
     console.log(`[stream] started cam ${id}`)
-    if (popupWindow && !popupWindow.isDestroyed()) {
-      popupWindow.webContents.send('stream-ready', `/hls/${id}/live.m3u8`)
+    try {
+      await waitForPlaylist(playlist)
+      if (popupWindow && !popupWindow.isDestroyed()) {
+        popupWindow.webContents.send('stream-ready', `/hls/${id}/live.m3u8`)
+      }
+    } catch(e) {
+      if (popupWindow && !popupWindow.isDestroyed()) {
+        popupWindow.webContents.send('stream-error', 'Playlist never appeared')
+      }
     }
 
     session.onCallEnded.subscribe(() => {
@@ -196,9 +238,7 @@ function startMotionListeners() {
       const name = cam.data.description || cam.data.kind || 'Camera'
       console.log(`[motion] ${name}`)
 
-      createPopupWindow(name, 'motion')
-      setTimeout(() => startStream(cam), 1200)
-      saveMotionClip(cam)
+      createPopupWindow(name, 'motion', id, true)
 
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('motion-event', { name, id })
@@ -210,9 +250,7 @@ function startMotionListeners() {
       const name = cam.data.description || cam.data.kind || 'Camera'
       console.log(`[ding] ${name}`)
 
-      createPopupWindow(name, 'ding')
-      setTimeout(() => startStream(cam), 1200)
-      saveMotionClip(cam)
+      createPopupWindow(name, 'ding', id, true)
 
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('ding-event', { name, id })
@@ -251,7 +289,7 @@ ipcMain.handle('login', async (_, { email, password, twoFactorCode }) => {
       const refreshToken = auth.refresh_token
 
       // Build a normal RingApi from the obtained refresh token
-      const api = new RingApi({ refreshToken, controlCenterDisplayName: 'Ring Desktop' })
+      const api = new RingApi({ refreshToken, controlCenterDisplayName: 'Ring Desktop', ffmpegPath })
       api.onRefreshTokenUpdated.subscribe(({ newRefreshToken }) => saveToken(newRefreshToken))
 
       cameras = await api.getCameras()
@@ -263,7 +301,7 @@ ipcMain.handle('login', async (_, { email, password, twoFactorCode }) => {
     }
 
     // Step 1: first login attempt — create instance and trigger auth
-    const api = new RingApi({ email, password, controlCenterDisplayName: 'Ring Desktop' })
+    const api = new RingApi({ email, password, controlCenterDisplayName: 'Ring Desktop', ffmpegPath })
     pendingApi = api   // keep alive so step 2 can reuse the same restClient
 
     // getCameras() triggers auth; throws if 2FA is required
@@ -298,7 +336,7 @@ ipcMain.handle('login', async (_, { email, password, twoFactorCode }) => {
 ipcMain.handle('connect-token', async (_, token) => {
   try {
     const { RingApi } = require('ring-client-api')
-    ringApi = new RingApi({ refreshToken: token, controlCenterDisplayName: 'Ring Desktop' })
+    ringApi = new RingApi({ refreshToken: token, controlCenterDisplayName: 'Ring Desktop', ffmpegPath })
     ringApi.onRefreshTokenUpdated.subscribe(({ newRefreshToken }) => saveToken(newRefreshToken))
     cameras = await ringApi.getCameras()
     saveToken(token)
@@ -333,7 +371,23 @@ ipcMain.handle('get-cameras', async () => {
 ipcMain.handle('get-snapshot', async (_, cameraId) => {
   const cam = cameras.find(c => String(c.data.device_id) === String(cameraId))
   if (!cam) return null
-  try { return (await cam.getSnapshot()).toString('base64') } catch(e) { return null }
+
+  // Don't grab a snapshot if a live stream is active — it will kill the session
+  if (simpleSessions[String(cameraId)]) {
+    console.log('[snapshot] skipping — live stream active')
+    return null
+  }
+
+  try {
+    // Reset cached state so we fetch any available snapshot, not just ones newer
+    // than the last one (which times out when no new motion has occurred)
+    cam.lastSnapshotTimestamp = 0
+    cam.lastSnapshotPromise   = undefined
+    return (await cam.getSnapshot()).toString('base64')
+  } catch(e) {
+    console.error('[snapshot] error:', e.message)
+    return null
+  }
 })
 
 ipcMain.handle('get-events', async (_, cameraId) => {
@@ -376,7 +430,7 @@ ipcMain.handle('get-recording-url', async (_, dingId) => {
 ipcMain.handle('get-saved-clips', () => {
   try {
     return fs.readdirSync(RECORDINGS_DIR)
-      .filter(f => f.endsWith('.mp4'))
+      .filter(f => f.endsWith('.mp4') || f.endsWith('.webm'))
       .map(f => {
         const full = path.join(RECORDINGS_DIR, f)
         const stat = fs.statSync(full)
@@ -386,14 +440,78 @@ ipcMain.handle('get-saved-clips', () => {
   } catch(e) { return [] }
 })
 
+ipcMain.handle('save-clip-buffer', async (_, { buffer, cameraName, timestamp }) => {
+  try {
+    const safeName = (cameraName || 'Camera').replace(/[^a-z0-9]/gi, '_')
+    const stamp    = new Date(timestamp || Date.now()).toISOString().replace(/[:.]/g, '-').replace('T','_').slice(0,19)
+    const outFile  = path.join(RECORDINGS_DIR, `${stamp}_${safeName}.webm`)
+    fs.writeFileSync(outFile, Buffer.from(buffer))
+    console.log(`[clip] saved → ${outFile}`)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('clip-saved', { file: outFile, camera: cameraName, time: new Date(timestamp).toISOString() })
+    }
+    return { ok: true, file: outFile }
+  } catch(e) {
+    console.error('[clip] save error:', e.message)
+    return { ok: false, error: e.message }
+  }
+})
+
+ipcMain.on('clip-saved-notify', (_, { file, camera }) => {
+  console.log(`[clip] saved → ${file}`)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('clip-saved', { file, camera, time: new Date().toISOString() })
+  }
+})
+
 ipcMain.on('open-url',         (_, url) => shell.openExternal(url))
 ipcMain.on('open-file',        (_, p)   => shell.openPath(p))
 ipcMain.on('open-recordings',  ()       => shell.openPath(RECORDINGS_DIR))
-ipcMain.on('close-popup',      ()       => { if (popupWindow && !popupWindow.isDestroyed()) popupWindow.close() })
-ipcMain.on('test-popup',       ()       => {
-  createPopupWindow('Front Door (Test)', 'motion')
+ipcMain.on('close-popup', () => { if (popupWindow && !popupWindow.isDestroyed()) popupWindow.close() })
+ipcMain.on('test-popup',  () => {
   const cam = cameras[0]
-  if (cam) { setTimeout(() => startStream(cam), 1200); saveMotionClip(cam) }
+  if (!cam) return
+  createPopupWindow('Front Door (Test)', 'motion', String(cam.data.device_id), true)
+})
+
+// ── WEBRTC LIVE VIEW (SimpleWebRtcSession via browser-native RTCPeerConnection) ──
+ipcMain.handle('start-webrtc-session', async (_, { cameraId, sdpOffer }) => {
+  const cam = cameras.find(c => String(c.data.device_id) === String(cameraId))
+  if (!cam) return { error: 'Camera not found' }
+
+  // Cooldown guard — Ring needs ~5s after a session ends before accepting a new one
+  const lastEnd = webrtcLastEnd[cameraId] || 0
+  const elapsed = Date.now() - lastEnd
+  if (elapsed < 5000) {
+    const wait = 5000 - elapsed
+    console.log(`[webrtc] cooldown, waiting ${wait}ms`)
+    await new Promise(r => setTimeout(r, wait))
+  }
+
+  try {
+    // End any existing session for this camera
+    if (simpleSessions[cameraId]) {
+      try { simpleSessions[cameraId].end() } catch(e) {}
+      delete simpleSessions[cameraId]
+    }
+    const session = cam.createSimpleWebRtcSession()
+    const sdpAnswer = await session.start(sdpOffer)
+    simpleSessions[cameraId] = session
+    return { sdpAnswer }
+  } catch(e) {
+    console.error('[webrtc] session error:', e.message)
+    return { error: e.message }
+  }
+})
+
+ipcMain.handle('stop-webrtc-session', async (_, cameraId) => {
+  const session = simpleSessions[cameraId]
+  if (session) {
+    try { await session.end() } catch(e) {}
+    delete simpleSessions[cameraId]
+    webrtcLastEnd[cameraId] = Date.now()  // record end time for cooldown
+  }
+  return { ok: true }
 })
 
 // ── LIFECYCLE ──
