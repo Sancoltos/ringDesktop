@@ -1,5 +1,5 @@
 {
-  "name": "ring-desktop",
+  "name": "lazy-ring-doorbell",
   "version": "3.0.0",
   "description": "Ring camera viewer with live popup and motion recording",
   "main": "src/main.js",
@@ -9,9 +9,11 @@
   },
   "build": {
     "appId": "com.ring.desktop",
-    "productName": "Ring Desktop",
-    "asar": false,
+    "productName": "Lazy Ring Doorbell",
+    "icon": "assets/lazyring",
+    "asar": true,
     "win": {
+      "icon": "assets/lazyring.ico",
       "target": "nsis"
     },
     "nsis": {
@@ -20,6 +22,7 @@
     },
     "mac": {
       "target": "dmg",
+      "icon": "assets/lazyring.icns",
       "category": "public.app-category.utilities"
     },
     "files": [
